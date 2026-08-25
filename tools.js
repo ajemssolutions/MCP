@@ -25,7 +25,7 @@ import {
   schemaFromDetail, inferSchema, rowData,
   applyFilters, applyDateRange, FILTER_OPS,
 } from "./ajems.js";
-import { ok, fail, mapLimit } from "./util.js";
+import { ok, fail, mapLimit, envFlag } from "./util.js";
 
 // How many rows we will scan when computing a count or total. Counts are exact
 // below this; above it they are reported as a lower bound.
@@ -34,7 +34,7 @@ const SCAN_LIMIT = Number(process.env.SCAN_LIMIT || 50000);
 // Ceiling on how much record data we hand back to the model in one response.
 // Large pages waste the model's context and get truncated by the client anyway.
 const MAX_RETURN_CHARS = Number(process.env.MAX_RETURN_CHARS || 60000);
-const ALLOW_WRITES = process.env.ALLOW_WRITES === "true";
+const ALLOW_WRITES = envFlag("ALLOW_WRITES");
 
 // Search scans records across forms, so it needs its own ceilings.
 const SEARCH_MAX_FORMS = Number(process.env.SEARCH_MAX_FORMS || 15);

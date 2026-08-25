@@ -18,11 +18,11 @@ import { mountOAuth, lookupSession, sessionCount } from "./oauth.js";
 import { getWorkspaceConfig, flattenForms } from "./ajems.js";
 import { buildServer, toolCount } from "./tools.js";
 import { cacheStats, limiterStats } from "./cache.js";
-import { originOf } from "./util.js";
+import { originOf, envFlag } from "./util.js";
 
 const PORT = Number(process.env.PORT || 8080);
 const PUBLIC_URL = process.env.PUBLIC_URL || `http://localhost:${PORT}`;
-const ALLOW_WRITES = process.env.ALLOW_WRITES === "true";
+const ALLOW_WRITES = envFlag("ALLOW_WRITES");
 const RATE_LIMIT = Number(process.env.RATE_LIMIT_PER_MIN || 90);
 
 // How an organisation name becomes an API base URL.
@@ -205,7 +205,11 @@ const httpServer = app.listen(PORT, () => {
   console.log(`AJEMS MCP server listening on port ${PORT}`);
   console.log(`Connector URL:  ${PUBLIC_URL}/mcp`);
   console.log(`Tenant pattern: ${HOST_TEMPLATE}`);
-  console.log(`Tools: ${toolCount} | Writes: ${ALLOW_WRITES ? "enabled" : "disabled"}`);
+  console.log(`Tools: ${toolCount} | Writes: ${ALLOW_WRITES ? "ENABLED" : "DISABLED"}`);
+  if (!ALLOW_WRITES) {
+    console.log("  -> Only the 7 read tools are being served.");
+    console.log(`  -> To enable the 6 write tools set ALLOW_WRITES=true in .env and restart. Currently ALLOW_WRITES=${JSON.stringify(process.env.ALLOW_WRITES ?? "(not set)")}`);
+  }
 });
 
 // Should exceed nginx's own timeouts to avoid mid-request resets.
