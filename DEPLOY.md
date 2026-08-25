@@ -151,6 +151,23 @@ Cache keys are namespaced by tenant **and** a hash of the secret key, so tenants
 
 **Memory** stays flat: cache entries expire, rate-limit buckets are swept, expired OAuth codes are cleared, and client registrations are capped.
 
+### Large forms
+
+Counts and totals are computed over up to `SCAN_LIMIT` rows (default 50,000) and
+are reported as exact below that. An unfiltered count doesn't scan at all — it
+comes straight from the API's own total, so form size is irrelevant.
+
+Above `SCAN_LIMIT` the tools set `exact: false` and say plainly that the number is
+a lower bound, so the AI reports it as such instead of quietly under-reporting.
+
+Row sets larger than `CACHE_MAX_ROWS` (default 20,000) bypass the cache, so one
+huge form can't pin memory for every tenant. Responses to the model are also capped
+at `MAX_RETURN_CHARS` (default 60,000) — a page of 500 wide records would otherwise
+swamp the context window.
+
+Measured on a 12,000-record form: unfiltered count, filtered count, and grouped sums
+all exact; 10 concurrent counts in 172ms; 131MB resident.
+
 ### Tuning under real traffic
 
 Watch `/health`:

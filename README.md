@@ -52,22 +52,41 @@ See `DEPLOY.md` for nginx, TLS, pm2 and tuning.
 
 Read-only by default. Set `ALLOW_WRITES=true` for the four write tools.
 
-| Tool | Purpose |
-|---|---|
-| `list_apps_and_forms` | Discovery — every app and form, with readable/writable flags |
-| `describe_form` | Field keys, human labels, types, dropdown options |
-| `query_responses` | Records with filters, date range, field selection |
-| `aggregate_responses` | count / sum / avg / min / max, optionally grouped |
-| `create_app` | New app |
-| `create_form` | New form; field keys generated automatically |
-| `create_record` | One or many records, inserted with bounded concurrency |
-| `update_record` | Change fields on an existing record |
-| `search` | Keyword search across forms and records (ChatGPT) |
-| `fetch` | Full detail for one search result (ChatGPT) |
+| Tool | Shown as | Purpose |
+|---|---|---|
+| `list_apps_and_forms` | See my apps and forms | Discovery; returns `total_apps` and `total_forms` |
+| `show_form_fields` | See what a form contains | Field keys, labels, types, options, record count |
+| `count_records` | Count records | An exact number, optionally filtered |
+| `find_records` | Find records | Records with filters, date range, field selection |
+| `summarise_records` | Total or average records | sum / avg / min / max, optionally grouped |
+| `create_app` | Create a new app | |
+| `update_app` | Rename or restyle an app | |
+| `create_form` | Create a new form | Field keys generated automatically |
+| `update_form` | Change a form's settings | Name, description, external read/write access |
+| `add_records` | Add records | One or many, bounded concurrency |
+| `update_record` | Update a record | Only the fields you pass |
+| `search` | Search everything | Keyword search across forms (ChatGPT) |
+| `fetch` | Open a search result | Full detail for one result (ChatGPT) |
 
-`aggregate_responses` computes on the server. Without it, "total by city" would pull thousands of rows into the model's context and count them by hand — slow, expensive, and wrong past a certain size.
+Read-only by default. Set `ALLOW_WRITES=true` for the six write tools.
 
-`search` and `fetch` exist because outside Developer Mode, ChatGPT only calls tools with those two names and ignores everything else.
+## Two rules the tools follow
+
+**Never make the model count.** Every list carries an explicit total, placed first
+in the response. Models that summarise long lists return numbers that drift between
+identical questions; `count_records` exists so a "how many" question never depends
+on counting an array.
+
+**No write happens without `confirm: true`.** The first call returns a preview and a
+warning instead of writing. For `update_record` the preview shows current values next
+to the new ones. This is enforced in the tool, not left to the model's judgement.
+
+`summarise_records` computes on the server. Without it, "total by city" would pull
+thousands of rows into the model's context and add them by hand — slow, expensive,
+and wrong past a certain size.
+
+`search` and `fetch` keep those exact names because outside Developer Mode, ChatGPT
+only calls tools named `search` and `fetch` and ignores everything else.
 
 ---
 
@@ -76,8 +95,8 @@ Read-only by default. Set `ALLOW_WRITES=true` for the four write tools.
 Claude asks *"how many entries in July, by city?"*:
 
 1. `list_apps_and_forms` → finds the form
-2. `describe_form` → learns that `date_1750943312417` is the date field and `dropdown_1750943301432` holds cities
-3. `aggregate_responses` with a date range and `group_by` → gets three numbers back
+2. `show_form_fields` → learns that `date_1750943312417` is the date field and `dropdown_1750943301432` holds cities
+3. `summarise_records` with a date range and `group_by` → gets three numbers back
 4. Writes the answer in plain English
 
 Field keys are auto-generated (`date_1750943312417`), which is why step 2 is not optional. The tool descriptions tell the model this, and it chains the calls itself.
@@ -99,4 +118,7 @@ When adding a tool, re-check the second point.
 
 ## Testing
 
-46 checks pass against the mock: authentication, all 10 tools, filters, date ranges, the `created_at` fallback, grouped aggregation, bulk insert, cache invalidation after writes, error messages, tenant isolation, 20 concurrent users, and rate limiting.
+27 checks pass against the mock covering the tool layer: all 13 tools present with
+correct annotations, explicit totals, filtered counts, the confirmation gate blocking
+and then allowing every write, before/after previews, and search totals. An earlier
+suite covers authentication, tenant isolation, 20 concurrent users and rate limiting.

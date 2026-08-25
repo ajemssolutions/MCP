@@ -29,7 +29,7 @@ const fields = [
   { field_type: "Number", label: "Meter Reading", required: true, key: "number_1750943386575" },
 ];
 
-const responses = Array.from({ length: 40 }, (_, i) => {
+const responses = Array.from({ length: Number(process.env.MOCK_ROWS || 40) }, (_, i) => {
   const n = i + 1;
   return {
     _id: `resp${n}`,
@@ -137,6 +137,27 @@ app.post("/:org/json_builder/forms/:fid/responses/", (req, res) => {
   else if (createdForms[req.params.fid]) createdForms[req.params.fid].rows.push(record);
   else return res.status(404).json({ error: "no such form" });
   res.json(record);
+});
+
+app.get("/:org/json_builder/apps/:aid/", (req, res) => {
+  const app_ = apps.find((a) => a.app_id === req.params.aid);
+  if (!app_) return res.status(404).json({ error: "no such app" });
+  res.json(app_);
+});
+
+app.patch("/:org/json_builder/apps/:aid/", (req, res) => {
+  const app_ = apps.find((a) => a.app_id === req.params.aid);
+  if (!app_) return res.status(404).json({ error: "no such app" });
+  Object.assign(app_, req.body);
+  res.json(app_);
+});
+
+app.patch("/:org/json_builder/forms/:fid/", (req, res) => {
+  const form = createdForms[req.params.fid];
+  if (req.params.fid === FORM_ID) return res.json({ form_id: FORM_ID, title: req.body.title || "Vehicle Washing", ...req.body });
+  if (!form) return res.status(404).json({ error: "no such form" });
+  Object.assign(form, req.body);
+  res.json(form);
 });
 
 app.patch("/:org/json_builder/forms/:fid/responses/:rid/", (req, res) => {

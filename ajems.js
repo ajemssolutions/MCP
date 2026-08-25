@@ -15,6 +15,14 @@ const TIMEOUT_MS = Number(process.env.UPSTREAM_TIMEOUT_MS || 20000);
 const CONFIG_TTL = Number(process.env.CONFIG_CACHE_MS || 60000);
 const ROWS_TTL = Number(process.env.ROWS_CACHE_MS || 20000);
 
+// Ceiling on rows held in memory for one form. Exists to protect the server,
+// not to limit answers: counts and totals are computed over everything below it.
+const SCAN_LIMIT = Number(process.env.SCAN_LIMIT || 50000);
+
+// Above this, skip the cache. Holding very large row sets for every tenant is
+// what would actually exhaust memory.
+const CACHE_MAX_ROWS = Number(process.env.CACHE_MAX_ROWS || 20000);
+
 // ---------------------------------------------------------------------------
 // Single request path
 // ---------------------------------------------------------------------------
@@ -166,14 +174,24 @@ export function rowData(row) {
  * The API returns every response in one call and ignores page parameters, so
  * fetch once and cap. Never loop on page= — it returns the same rows again.
  */
-export async function fetchRows(ctx, form, maxRows) {
-  const payload = await cached(nsRows(ctx, form.form_id), ROWS_TTL, () => call(ctx, form.list_url));
+export async function fetchRows(ctx, form, maxRows = SCAN_LIMIT) {
+  const key = nsRows(ctx, form.form_id);
+  const fetchIt = () => call(ctx, form.list_url);
+
+  // Peek at the cache first; only very large results bypass it.
+  let payload = await cached(key, ROWS_TTL, fetchIt);
+  if (toRows(payload).length > CACHE_MAX_ROWS) invalidate(key);
+
   const all = toRows(payload);
+  const limit = Math.min(maxRows, SCAN_LIMIT);
+
   return {
-    rows: all.slice(0, maxRows),
+    rows: all.slice(0, limit),
     total: payload?.count ?? all.length,
     labels: payload?.labels || {},
-    truncated: all.length > maxRows,
+    // True only when the server ceiling was actually hit, which means numbers
+    // computed from these rows are a lower bound.
+    truncated: all.length > limit,
   };
 }
 
@@ -227,12 +245,28 @@ export async function createApp(ctx, { title, description = "", icon = "", color
   return res;
 }
 
+export async function updateApp(ctx, appId, patch) {
+  const res = await call(ctx, `apps/${encodeURIComponent(appId)}/`, { method: "PATCH", body: patch });
+  invalidate(nsConfig(ctx));
+  return res;
+}
+
+export async function getApp(ctx, appId) {
+  return call(ctx, `apps/${encodeURIComponent(appId)}/`);
+}
+
+export async function updateForm(ctx, formId, patch) {
+  const res = await call(ctx, `forms/${encodeURIComponent(formId)}/`, { method: "PATCH", body: patch });
+  invalidate(nsConfig(ctx));
+  return res;
+}
+
 /** AJEMS field keys are `<type>_<epoch ms>`; the index avoids same-millisecond collisions. */
 function generateFieldKey(fieldType, index = 0) {
   return `${String(fieldType).toLowerCase()}_${Date.now() + index}`;
 }
 
-export async function createForm(ctx, { app_id, title, description = "", fields = [] }) {
+export async function createForm(ctx, { app_id, title, description = "", fields = [], allowWrites = true }) {
   const res = await call(ctx, "forms/", {
     method: "POST",
     body: {
@@ -243,7 +277,7 @@ export async function createForm(ctx, { app_id, title, description = "", fields 
       // Enabled so this connector can read and write the form it just made.
       isThirdPartyEnabled: true,
       isThirdPartyGetAllowed: true,
-      isThirdPartyPostAllowed: true,
+      isThirdPartyPostAllowed: allowWrites,
       thirdPartyGetFields: [],
       thirdPartyPostFields: [],
       allowFormColStat: false,
