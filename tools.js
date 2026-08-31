@@ -25,7 +25,8 @@ import {
   schemaFromDetail, inferSchema, rowData,
   applyFilters, applyDateRange, FILTER_OPS,
 } from "./ajems.js";
-import { ok, fail, mapLimit, envFlag } from "./util.js";
+import { ok, fail, mapLimit } from "./util.js";
+import { envFlag } from "./config.js";
 
 // How many rows we will scan when computing a count or total. Counts are exact
 // below this; above it they are reported as a lower bound.
@@ -34,7 +35,6 @@ const SCAN_LIMIT = Number(process.env.SCAN_LIMIT || 50000);
 // Ceiling on how much record data we hand back to the model in one response.
 // Large pages waste the model's context and get truncated by the client anyway.
 const MAX_RETURN_CHARS = Number(process.env.MAX_RETURN_CHARS || 60000);
-const ALLOW_WRITES = envFlag("ALLOW_WRITES");
 
 // Search scans records across forms, so it needs its own ceilings.
 const SEARCH_MAX_FORMS = Number(process.env.SEARCH_MAX_FORMS || 15);
@@ -114,6 +114,10 @@ function aggregate({ rows, metric, metricField, groupBy }) {
 }
 
 export function buildServer(ctx, audit) {
+  // Read at call time, not at import time: module evaluation order would
+  // otherwise decide whether .env had been loaded yet.
+  const ALLOW_WRITES = envFlag("ALLOW_WRITES");
+
   const server = new McpServer({ name: "ajems", version: "2.0.0" });
 
   const tool = (name, config, handler) =>
@@ -671,4 +675,4 @@ export function buildServer(ctx, audit) {
   return server;
 }
 
-export const toolCount = ALLOW_WRITES ? 13 : 7;
+export const toolCount = () => (envFlag("ALLOW_WRITES") ? 13 : 7);

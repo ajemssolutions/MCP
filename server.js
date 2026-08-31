@@ -10,7 +10,8 @@
 //   oauth.js    the sign-in handshake Claude and ChatGPT require
 //   cache.js    per-tenant caching and upstream concurrency limiting
 
-import "dotenv/config";
+// MUST be first: loads .env before any other module reads process.env.
+import { ENV_PATH, ENV_FOUND, envFlag } from "./config.js";
 import express from "express";
 
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -18,7 +19,7 @@ import { mountOAuth, lookupSession, sessionCount } from "./oauth.js";
 import { getWorkspaceConfig, flattenForms } from "./ajems.js";
 import { buildServer, toolCount } from "./tools.js";
 import { cacheStats, limiterStats } from "./cache.js";
-import { originOf, envFlag } from "./util.js";
+import { originOf } from "./util.js";
 
 const PORT = Number(process.env.PORT || 8080);
 const PUBLIC_URL = process.env.PUBLIC_URL || `http://localhost:${PORT}`;
@@ -125,9 +126,10 @@ mountOAuth(app, { publicUrl: PUBLIC_URL, verifyCredentials });
 app.get("/health", (_req, res) => res.json({
   ok: true,
   mode: "multi-tenant",
-  tools: toolCount,
+  tools: toolCount(),
   writes: ALLOW_WRITES,
   sessions: sessionCount(),
+  config: { env_file: ENV_PATH, env_file_found: ENV_FOUND, allow_writes_raw: process.env.ALLOW_WRITES ?? null },
   cache: cacheStats(),
   upstream: limiterStats(),
   memory_mb: Math.round(process.memoryUsage().rss / 1048576),
@@ -203,9 +205,11 @@ process.on("uncaughtException", (e) => console.error("[uncaughtException]", e?.m
 
 const httpServer = app.listen(PORT, () => {
   console.log(`AJEMS MCP server listening on port ${PORT}`);
+  console.log(`Working dir:   ${process.cwd()}`);
+  console.log(`Config file:   ${ENV_PATH} ${ENV_FOUND ? "(loaded)" : "*** NOT FOUND — defaults in use ***"}`);
   console.log(`Connector URL:  ${PUBLIC_URL}/mcp`);
   console.log(`Tenant pattern: ${HOST_TEMPLATE}`);
-  console.log(`Tools: ${toolCount} | Writes: ${ALLOW_WRITES ? "ENABLED" : "DISABLED"}`);
+  console.log(`Tools: ${toolCount()} | Writes: ${ALLOW_WRITES ? "ENABLED" : "DISABLED"}`);
   if (!ALLOW_WRITES) {
     console.log("  -> Only the 7 read tools are being served.");
     console.log(`  -> To enable the 6 write tools set ALLOW_WRITES=true in .env and restart. Currently ALLOW_WRITES=${JSON.stringify(process.env.ALLOW_WRITES ?? "(not set)")}`);
