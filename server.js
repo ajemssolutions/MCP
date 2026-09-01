@@ -59,10 +59,12 @@ const REPORT_TIMEOUT_MS = Number(process.env.CONNECTOR_REPORT_TIMEOUT_MS || 10_0
 const HEARTBEAT_MS = Number(process.env.CONNECTOR_HEARTBEAT_MS || 5 * 60 * 1000);
 
 // Safety net for clients that discard their token WITHOUT calling /revoke
-// (e.g. a connector added before the revocation endpoint existed): a session
-// with no traffic for this long stops being heartbeated, so the Store times it
-// out instead of showing a zombie as Connected forever. Any traffic revives it.
-const ACTIVE_WINDOW_MS = Number(process.env.CONNECTOR_ACTIVE_WINDOW_MS || 24 * 60 * 60 * 1000);
+// (observed: claude.ai removes a connector silently): a session with no
+// traffic for this long stops being heartbeated, so the Store times it out
+// instead of showing a zombie as Connected forever. One hour keeps that lie
+// short; a dormant session that speaks again reports the moment it wakes
+// (see handleMcp), so the short window costs a real user nothing.
+const ACTIVE_WINDOW_MS = Number(process.env.CONNECTOR_ACTIVE_WINDOW_MS || 60 * 60 * 1000);
 
 const lastSeenOf = (s) => s?.lastSeen || Date.parse(s?.created || "") || 0;
 const isActiveSession = (s) => Date.now() - lastSeenOf(s) < ACTIVE_WINDOW_MS;
@@ -354,9 +356,21 @@ async function handleMcp(req, res) {
 
   // Every authenticated request marks its session as alive — this is what
   // keeps a real connector heartbeating and lets an abandoned one go dormant.
+  // A DORMANT session waking up reports immediately: its heartbeats were
+  // skipped while it slept, so without this the card would stay Offline
+  // until the next 5-minute beat even though the user is actively back.
   const header = req.headers.authorization || "";
   const rawToken = header.startsWith("Bearer ") ? header.slice(7).trim() : (req.params?.token || req.query?.key || null);
-  if (rawToken) touchSession(rawToken);
+  if (rawToken) {
+    const s = lookupSession(rawToken);
+    const wasDormant = s && !isActiveSession(s);
+    touchSession(rawToken);
+    if (wasDormant && s.client && STORE_ENDPOINTS[s.client]) {
+      linkOrg(s.tenant, s.secretKey);
+      orgClientSet(s.tenant).add(s.client);
+      reportClient(s.tenant, s.client);
+    }
+  }
 
   // initialize names the calling client. Sessions signed in before client
   // detection existed get identified and stamped here, then start reporting
