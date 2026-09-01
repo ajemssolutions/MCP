@@ -146,11 +146,11 @@ function signInPage({ error, org = "", ...params }) {
 </div></body></html>`;
 }
 
-export function mountOAuth(app, { publicUrl, verifyCredentials }) {
+export function mountOAuth(app, { publicUrl, verifyCredentials, onRevoke }) {
   const origin = (req) => originOf(req, publicUrl);
 
   app.use((req, _res, next) => {
-    if (/^\/(\.well-known|register|authorize|token)/.test(req.path)) {
+    if (/^\/(\.well-known|register|authorize|token|revoke)/.test(req.path)) {
       console.log(`[oauth] ${req.method} ${req.path}`);
     }
     next();
@@ -165,6 +165,7 @@ export function mountOAuth(app, { publicUrl, verifyCredentials }) {
       authorization_endpoint: `${base}/authorize`,
       token_endpoint: `${base}/token`,
       registration_endpoint: `${base}/register`,
+      revocation_endpoint: `${base}/revoke`,
       response_types_supported: ["code"],
       grant_types_supported: ["authorization_code"],
       code_challenge_methods_supported: ["S256", "plain"],
@@ -273,6 +274,25 @@ export function mountOAuth(app, { publicUrl, verifyCredentials }) {
     url.searchParams.set("code", code);
     if (req.body.state) url.searchParams.set("state", req.body.state);
     res.redirect(url.toString());
+  });
+
+  // --- Revocation (RFC 7009) -----------------------------------------------
+  // Claude (and ChatGPT) call this when the user removes the connector in
+  // their UI. It is the ONLY signal a client-side disconnect ever sends, so
+  // it feeds the same per-client unlink path the /unlink endpoint uses —
+  // without it the saved session would keep heartbeating "connected" forever.
+
+  app.post("/revoke", (req, res) => {
+    const token = req.body?.token;
+    if (typeof token === "string" && token) {
+      const result = revokeSession(token);
+      if (result) {
+        console.log(`[oauth] token revoked by client for "${result.tenant}"`);
+        onRevoke?.(result);
+      }
+    }
+    // RFC 7009: always 200, so callers cannot probe which tokens exist.
+    res.status(200).json({});
   });
 
   // --- Token ---------------------------------------------------------------

@@ -301,7 +301,13 @@ app.set("trust proxy", true);   // behind nginx or Cloudflare, honour X-Forwarde
 app.use(express.json({ limit: "4mb" }));
 app.use(express.urlencoded({ extended: true }));
 
-mountOAuth(app, { publicUrl: PUBLIC_URL, verifyCredentials });
+mountOAuth(app, {
+  publicUrl: PUBLIC_URL,
+  verifyCredentials,
+  // A client revoking its token is that client disconnecting: report it
+  // offline unless the same client still has another session for the org.
+  onRevoke: (r) => disconnectOrg(r.tenant, r.client, r.remaining),
+});
 
 app.get("/health", (_req, res) => res.json({
   ok: true,
