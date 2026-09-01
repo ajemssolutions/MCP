@@ -116,6 +116,51 @@ When adding a tool, re-check the second point.
 
 ---
 
+## How disconnects are detected (and the honest limitation)
+
+The Connector Store shows a Claude/ChatGPT card as Connected only while this
+server vouches for it. Three paths take a card down; know which one you are
+relying on:
+
+**1. Client-initiated revocation — instant, but NOT guaranteed.**
+This server implements RFC 7009: it advertises `revocation_endpoint` in its
+OAuth metadata and serves `POST /revoke`. A client that calls it on
+disconnect gets the exact session invalidated and one `status:"disconnected"`
+report sent within seconds. **However: nothing obliges claude.ai to call
+it.** Anthropic's connector documentation specifies no signal of any kind on
+connector removal, the MCP authorization spec does not reference RFC 7009 at
+all (clients are neither required nor recommended to revoke on disconnect),
+and in production claude.ai has been observed removing a connector silently.
+Whether claude.ai caches the OAuth metadata per connector (so a later-added
+revocation endpoint is only picked up after remove + re-add) is also
+undocumented. Treat instant detection as best-effort, never as a guarantee.
+
+**2. Dashboard Disconnect — instant and always available.**
+Clicking Disconnect on the Store card takes effect immediately and sticks:
+heartbeats and check-status never resurrect it; only a fresh sign-in
+(`reconnect: true`) does. This is the reliable way to take a card down *now*.
+
+**3. Dormancy fallback — guaranteed, within the activity window.**
+`lastSeen` advances only on genuine authenticated MCP requests. A session
+with no traffic for `CONNECTOR_ACTIVE_WINDOW_MS` (default 1 hour) goes
+dormant: one `status:"disconnected"` report is sent and heartbeats stop, so
+a silent claude.ai removal shows as Disconnected within roughly the window
+plus one heartbeat (~65 minutes at defaults). A dormant session that speaks
+again reports back the moment it wakes. Shortening the window makes silent
+removals surface faster, but marks genuinely-connected-but-idle users
+Disconnected between uses — they reconnect automatically on their next
+request, at the cost of the card flapping. 1 hour is the compromise.
+
+There is no fourth option: when the client sends nothing and the user clicks
+nothing, absence of traffic is the only signal, and it is indistinguishable
+from idleness until the window expires.
+
+References: [Anthropic remote-MCP connector docs](https://support.claude.com/en/articles/11175166-getting-started-with-custom-connectors-using-remote-mcp) ·
+[MCP authorization spec](https://modelcontextprotocol.io/specification/draft/basic/authorization) ·
+[RFC 7009](https://www.rfc-editor.org/rfc/rfc7009.html)
+
+---
+
 ## Testing
 
 27 checks pass against the mock covering the tool layer: all 13 tools present with
