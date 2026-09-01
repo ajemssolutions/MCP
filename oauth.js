@@ -52,6 +52,23 @@ loadSessions();
 export const lookupSession = (token) => sessions[token] || null;
 export const sessionCount = () => Object.keys(sessions).length;
 
+// Persist activity stamps at most this often per session — every authenticated
+// request touches, but a disk write per request would be a write storm.
+const TOUCH_SAVE_MS = 5 * 60 * 1000;
+
+/**
+ * Record that a session's token was just used. lastSeen is what separates a
+ * live connector from a zombie session whose client silently discarded its
+ * token without revoking it.
+ */
+export function touchSession(token) {
+  const session = sessions[token];
+  if (!session) return;
+  const prev = session.lastSeen || 0;
+  session.lastSeen = Date.now();
+  if (session.lastSeen - prev > TOUCH_SAVE_MS) saveSessions();
+}
+
 /** Every saved session. Used at startup to re-link organisations. */
 export const allSessions = () => Object.values(sessions);
 
@@ -325,7 +342,7 @@ export function mountOAuth(app, { publicUrl, verifyCredentials, onRevoke }) {
     }
 
     const access_token = `ajems_oauth_${rnd(24)}`;
-    sessions[access_token] = { ...entry.ctx, created: new Date().toISOString() };
+    sessions[access_token] = { ...entry.ctx, created: new Date().toISOString(), lastSeen: Date.now() };
     saveSessions();
     console.log(`[oauth] issued token for "${entry.ctx.tenant}"`);
 

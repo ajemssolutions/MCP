@@ -37,6 +37,7 @@ const PORT = store.address().port;
 process.env.CONNECTOR_STORE_URL = `http://127.0.0.1:${PORT}/api/connectors`;
 process.env.CONNECTOR_HEARTBEAT_MS = "400";
 process.env.CONNECTOR_REPORT_TIMEOUT_MS = "600";
+process.env.CONNECTOR_ACTIVE_WINDOW_MS = "60000";
 
 // Load the block as a module by appending exports for the functions it defines.
 const block = source.slice(start, end);
@@ -127,11 +128,13 @@ check("seeded2 targets chatgpt only", M.targetsFor("seeded2").join() === "chatgp
 // 5 --------------------------------------------------------------------------
 console.log("\n5. Heartbeat covers active identified sessions only");
 reset();
+const now = Date.now();
 const activeSessions = [
-  { tenant: "orgone", secretKey: KEY_A, client: "claude" },
-  { tenant: "orgone", secretKey: KEY_A, client: "claude" },     // duplicate (client, org)
-  { tenant: "seeded1", secretKey: KEY_B },                       // unidentified: never reported
-  { tenant: "seeded2", secretKey: "sk-two", client: "chatgpt" },
+  { tenant: "orgone", secretKey: KEY_A, client: "claude", lastSeen: now },
+  { tenant: "orgone", secretKey: KEY_A, client: "claude", lastSeen: now },   // duplicate (client, org)
+  { tenant: "seeded1", secretKey: KEY_B, lastSeen: now },                     // unidentified: never reported
+  { tenant: "seeded2", secretKey: "sk-two", client: "chatgpt", lastSeen: now },
+  { tenant: "zombie", secretKey: "sk-zombie", client: "claude", lastSeen: now - 120000 },   // dormant
 ];
 M.startConnectorHeartbeat(() => activeSessions);
 await settle(950);
@@ -145,6 +148,7 @@ await settle(950);
   check("no heartbeat carries reconnect", received.every((r) => !("reconnect" in r.body)));
   check("claude session only hits claude", received.filter((r) => r.body.org === "orgone").every((r) => r.url.includes("/claude/")));
   check("chatgpt session only hits chatgpt", received.filter((r) => r.body.org === "seeded2").every((r) => r.url.includes("/chatgpt/")));
+  check("dormant session never heartbeated", !orgs.has("zombie"));
 }
 
 // 6 --------------------------------------------------------------------------
@@ -152,8 +156,8 @@ console.log("\n6. Disconnect is per client, and only when its last session goes"
 M.orgClients.set("seeded1", new Set(["claude", "chatgpt"]));
 reset();
 const stillActive = [
-  { tenant: "seeded1", secretKey: KEY_B, client: "claude" },
-  { tenant: "seeded1", secretKey: KEY_B, client: "chatgpt" },
+  { tenant: "seeded1", secretKey: KEY_B, client: "claude", lastSeen: Date.now() },
+  { tenant: "seeded1", secretKey: KEY_B, client: "chatgpt", lastSeen: Date.now() },
 ];
 // The heartbeat interval from test 5 is still beating in the background, so
 // these checks look only at disconnect reports, never at total traffic.
@@ -164,7 +168,17 @@ await settle(50);
 check("no disconnect was sent", disconnects().length === 0);
 
 reset();
-const onlyChatgptLeft = [{ tenant: "seeded1", secretKey: KEY_B, client: "chatgpt" }];
+// A dormant same-client sibling (an unrevoked zombie) must NOT block the report.
+const zombieSibling = [
+  { tenant: "seeded1", secretKey: KEY_B, client: "claude", lastSeen: Date.now() - 120000 },
+];
+M.disconnectOrg("seeded1", "claude", zombieSibling);
+await settle();
+check("zombie sibling does not block disconnect", disconnects().length === 1 && disconnects()[0].url.includes("/claude/"));
+M.orgClientSet("seeded1").add("claude");   // restore for the next checks
+
+reset();
+const onlyChatgptLeft = [{ tenant: "seeded1", secretKey: KEY_B, client: "chatgpt", lastSeen: Date.now() }];
 check("org kept while another client remains", M.disconnectOrg("seeded1", "claude", onlyChatgptLeft) === false);
 await settle();
 check("claude got its disconnect", disconnects().length === 1 && disconnects()[0].url.includes("/claude/"));

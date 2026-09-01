@@ -15,7 +15,7 @@ import { ENV_PATH, ENV_FOUND, envFlag } from "./config.js";
 import express from "express";
 
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { mountOAuth, lookupSession, sessionCount, allSessions, revokeSession, setSessionClient } from "./oauth.js";
+import { mountOAuth, lookupSession, sessionCount, allSessions, revokeSession, setSessionClient, touchSession } from "./oauth.js";
 import { getWorkspaceConfig, flattenForms } from "./ajems.js";
 import { buildServer, toolCount } from "./tools.js";
 import { cacheStats, limiterStats } from "./cache.js";
@@ -57,6 +57,15 @@ const STORE_ENDPOINTS = {
 };
 const REPORT_TIMEOUT_MS = Number(process.env.CONNECTOR_REPORT_TIMEOUT_MS || 10_000);
 const HEARTBEAT_MS = Number(process.env.CONNECTOR_HEARTBEAT_MS || 5 * 60 * 1000);
+
+// Safety net for clients that discard their token WITHOUT calling /revoke
+// (e.g. a connector added before the revocation endpoint existed): a session
+// with no traffic for this long stops being heartbeated, so the Store times it
+// out instead of showing a zombie as Connected forever. Any traffic revives it.
+const ACTIVE_WINDOW_MS = Number(process.env.CONNECTOR_ACTIVE_WINDOW_MS || 24 * 60 * 60 * 1000);
+
+const lastSeenOf = (s) => s?.lastSeen || Date.parse(s?.created || "") || 0;
+const isActiveSession = (s) => Date.now() - lastSeenOf(s) < ACTIVE_WINDOW_MS;
 
 const linkedOrgs = new Map();   // org -> secretKey
 const orgClients = new Map();   // org -> Set of "claude" | "chatgpt"; absent means unknown
@@ -164,7 +173,9 @@ function disconnectOrg(org, client, remainingSessions = []) {
   if (!secretKey) return false;
 
   const orgSessions = remainingSessions.filter((s) => s?.tenant === org);
-  if (STORE_ENDPOINTS[client] && !orgSessions.some((s) => s?.client === client)) {
+  // Only a RECENTLY ACTIVE sibling session blocks the disconnect report — a
+  // zombie left by an unrevoked disconnect must not keep the card Connected.
+  if (STORE_ENDPOINTS[client] && !orgSessions.some((s) => s?.client === client && isActiveSession(s))) {
     void reportToStore(STORE_ENDPOINTS[client], org, secretKey, { status: "disconnected" });
     orgClients.get(org)?.delete(client);
   }
@@ -184,6 +195,7 @@ function startConnectorHeartbeat(getSessions = () => []) {
     const seen = new Set();
     for (const s of getSessions()) {
       if (!s?.tenant || !s?.secretKey || !STORE_ENDPOINTS[s.client]) continue;
+      if (!isActiveSession(s)) continue;   // dormant: no heartbeat until traffic revives it
       const key = `${s.client}:${s.tenant}`;
       if (seen.has(key)) continue;
       seen.add(key);
@@ -340,18 +352,22 @@ async function handleMcp(req, res) {
     });
   }
 
+  // Every authenticated request marks its session as alive — this is what
+  // keeps a real connector heartbeating and lets an abandoned one go dormant.
+  const header = req.headers.authorization || "";
+  const rawToken = header.startsWith("Bearer ") ? header.slice(7).trim() : (req.params?.token || req.query?.key || null);
+  if (rawToken) touchSession(rawToken);
+
   // initialize names the calling client. Sessions signed in before client
   // detection existed get identified and stamped here, then start reporting
   // to their one endpoint. Cheap, and skipped for every other method.
   if (req.body?.method === "initialize") {
     linkOrg(ctx.tenant, ctx.secretKey);
     const client = detectClient(req.body?.params?.clientInfo?.name);
+    // Report once, when the session is first stamped with its client.
     if (client) {
       noteClient(ctx.tenant, req.body?.params?.clientInfo?.name);
-      const header = req.headers.authorization || "";
-      const token = header.startsWith("Bearer ") ? header.slice(7).trim() : (req.params?.token || req.query?.key || null);
-      // Report once, when the session is first stamped with its client.
-      if (token && setSessionClient(token, client)) reportClient(ctx.tenant, client);
+      if (rawToken && setSessionClient(rawToken, client)) reportClient(ctx.tenant, client);
     }
   }
 
