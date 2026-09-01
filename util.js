@@ -1,5 +1,10 @@
 // util.js — small helpers shared across modules.
 
+// Compatibility: envFlag's home is config.js, but a deployment was seen
+// importing it from here (SyntaxError at startup). Re-exporting costs nothing
+// and makes either import path work.
+export { envFlag } from "./config.js";
+
 /**
  * Work out this server's own public address from the incoming request.
  * Reading it from headers means a change of domain or tunnel needs no config

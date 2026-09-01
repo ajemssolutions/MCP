@@ -180,6 +180,11 @@ function disconnectOrg(org, client, remainingSessions = []) {
   if (STORE_ENDPOINTS[client] && !orgSessions.some((s) => s?.client === client && isActiveSession(s))) {
     void reportToStore(STORE_ENDPOINTS[client], org, secretKey, { status: "disconnected" });
     orgClients.get(org)?.delete(client);
+    /* An explicit revoke/unlink is FINAL for this pair: clear the dormancy
+       bookkeeping so no later beat repeats the disconnect, and no wake-up
+       may undo it — only a fresh sign-in reconnects. */
+    reportedActive.delete(pairKey(client, org));
+    dormantMarked.delete(pairKey(client, org));
   }
 
   if (orgSessions.length) return false;
@@ -188,24 +193,82 @@ function disconnectOrg(org, client, remainingSessions = []) {
   return true;
 }
 
+/* ---- dormancy state machine ------------------------------------------------
+   Connected means "an identified session with recent REAL authenticated MCP
+   activity" — never "a session file exists". Transitions are reported once:
+
+     active  -> dormant : ONE status:"disconnected" report, then silence
+     dormant -> active  : ONE immediate report — with reconnect:true ONLY when
+                          undoing OUR OWN dormancy disconnect
+
+   `reportedActive` holds the (client, org) pairs we last vouched for;
+   `dormantMarked` holds the pairs WE took down for inactivity — the one kind
+   of disconnect a wake-up is allowed to undo. A DASHBOARD disconnect is never
+   in that set, so activity alone sends a plain report, which the Store's
+   disconnect-persistence deliberately ignores; only a fresh sign-in
+   (verifyCredentials -> reconnect:true) revives it. */
+const reportedActive = new Set();
+const dormantMarked = new Set();
+const pairKey = (client, org) => `${client}:${org}`;
+
+/**
+ * A dormant session made a REAL authenticated request: report immediately —
+ * spec: never wait for the next heartbeat cycle — and resume normal beats.
+ */
+function reactivateSession(s) {
+  if (!s?.tenant || !s?.secretKey || !STORE_ENDPOINTS[s.client]) return;
+  const key = pairKey(s.client, s.tenant);
+  linkOrg(s.tenant, s.secretKey);
+  orgClientSet(s.tenant).add(s.client);
+  const undoingOurOwn = dormantMarked.delete(key);
+  if (undoingOurOwn) console.log(`[session] client=${s.client} org=${s.tenant} state=reactivated`);
+  reportedActive.add(key);
+  reportClient(s.tenant, s.client, undoingOurOwn ? { reconnect: true } : {});
+}
+
 /**
  * 5-minute heartbeat over ACTIVE sessions only, one report per (client, org)
- * pair. Sessions with no identified client are skipped entirely.
+ * pair. Sessions with no identified client are skipped entirely, and a pair
+ * whose last active session went dormant gets exactly one disconnected
+ * report — never one per beat.
  */
 function startConnectorHeartbeat(getSessions = () => []) {
   const beat = () => {
-    const seen = new Set();
-    for (const s of getSessions()) {
+    const sessions = getSessions();
+    const active = new Map();   // pairKey -> secretKey, deduplicated
+    for (const s of sessions) {
       if (!s?.tenant || !s?.secretKey || !STORE_ENDPOINTS[s.client]) continue;
       if (!isActiveSession(s)) continue;   // dormant: no heartbeat until traffic revives it
-      const key = `${s.client}:${s.tenant}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      void reportToStore(STORE_ENDPOINTS[s.client], s.tenant, s.secretKey);
+      if (!active.has(pairKey(s.client, s.tenant))) active.set(pairKey(s.client, s.tenant), s.secretKey);
     }
-    return seen.size;
+
+    for (const [key, secretKey] of active) {
+      const [client, org] = key.split(":");
+      const undoingOurOwn = dormantMarked.delete(key);
+      if (undoingOurOwn) console.log(`[session] client=${client} org=${org} state=reactivated`);
+      reportedActive.add(key);
+      void reportToStore(STORE_ENDPOINTS[client], org, secretKey, undoingOurOwn ? { reconnect: true } : {});
+    }
+
+    /* active -> dormant: one disconnected report at the transition. Pairs
+       that were never vouched for this process lifetime (e.g. dormant saved
+       sessions found at boot) send nothing — the Store's heartbeat staleness
+       already shows them Offline, and a restart must not invent state. */
+    for (const key of [...reportedActive]) {
+      if (active.has(key)) continue;
+      reportedActive.delete(key);
+      const [client, org] = key.split(":");
+      const secretKey = linkedOrgs.get(org) ||
+        sessions.find((s) => s?.tenant === org && s?.secretKey)?.secretKey;
+      if (!secretKey) continue;
+      console.log(`[session] client=${client} org=${org} state=dormant`);
+      dormantMarked.add(key);
+      void reportToStore(STORE_ENDPOINTS[client], org, secretKey, { status: "disconnected" });
+    }
+
+    return active.size;
   };
-  const first = beat();                      // report restored sessions immediately
+  const first = beat();                      // report restored ACTIVE sessions immediately
   setInterval(beat, HEARTBEAT_MS).unref();   // never holds the process open
   console.log(`[connector-report] heartbeat every ${HEARTBEAT_MS / 60000} min (${first} connection(s) now)`);
 }
@@ -252,6 +315,10 @@ async function verifyCredentials(organisation, secretKey, clientHint) {
   if (client) {
     ctx.client = client;
     orgClientSet(org).add(client);
+    // Fresh sign-in is the one act that reconnects ANY kind of disconnect.
+    // Register the pair as vouched-for so a later dormancy reports properly.
+    reportedActive.add(pairKey(client, org));
+    dormantMarked.delete(pairKey(client, org));
     reportClient(org, client, { reconnect: true });   // fresh link — best effort, never awaited
   } else {
     console.log(`[connector-report] org=${org} client not identified at sign-in — not reported yet`);
@@ -365,11 +432,7 @@ async function handleMcp(req, res) {
     const s = lookupSession(rawToken);
     const wasDormant = s && !isActiveSession(s);
     touchSession(rawToken);
-    if (wasDormant && s.client && STORE_ENDPOINTS[s.client]) {
-      linkOrg(s.tenant, s.secretKey);
-      orgClientSet(s.tenant).add(s.client);
-      reportClient(s.tenant, s.client);
-    }
+    if (wasDormant) reactivateSession(s);
   }
 
   // initialize names the calling client. Sessions signed in before client

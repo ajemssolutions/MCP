@@ -66,7 +66,12 @@ export function touchSession(token) {
   if (!session) return;
   const prev = session.lastSeen || 0;
   session.lastSeen = Date.now();
-  if (session.lastSeen - prev > TOUCH_SAVE_MS) saveSessions();
+  if (session.lastSeen - prev > TOUCH_SAVE_MS) {
+    // Throttled to the persistence cadence so real use is visible in the
+    // logs without a line per request. Never the token itself.
+    console.log(`[session] client=${session.client || "unidentified"} org=${session.tenant} activity=updated`);
+    saveSessions();
+  }
 }
 
 /** Every saved session. Used at startup to re-link organisations. */

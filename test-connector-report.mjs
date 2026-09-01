@@ -44,7 +44,8 @@ const block = source.slice(start, end);
 const tmp = "./.connector-block.test.mjs";
 fs.writeFileSync(tmp, `${block}
 export { reportToStore, reportOrg, reportClient, linkOrg, seedLinkedOrgs, noteClient, disconnectOrg,
-         targetsFor, detectClient, orgClientSet, startConnectorHeartbeat, linkedOrgs, orgClients, STORE_ENDPOINTS };
+         targetsFor, detectClient, orgClientSet, startConnectorHeartbeat, linkedOrgs, orgClients, STORE_ENDPOINTS,
+         reactivateSession };
 `);
 const M = await import(tmp);
 
@@ -200,7 +201,50 @@ await settle(50);
 check("still nothing sent", disconnects().length === 0);
 
 // 7 --------------------------------------------------------------------------
-console.log("\n7. Store failures never throw");
+console.log("\n7. Dormancy transitions: one disconnected, wake reports immediately");
+// The heartbeat from test 5 still drives `activeSessions` — mutate lastSeen
+// to move orgone's claude sessions between active and dormant.
+const connectedsFor = (org) => received.filter((r) => r.body.org === org && r.body.status === "connected");
+const disconnectsFor = (org) => received.filter((r) => r.body.org === org && r.body.status === "disconnected");
+
+reset();
+activeSessions[0].lastSeen = Date.now() - 120000;   // both orgone claude sessions
+activeSessions[1].lastSeen = Date.now() - 120000;   // fall silent together
+await settle(950);
+check("one disconnected report at the transition", disconnectsFor("orgone").length === 1, `got ${disconnectsFor("orgone").length}`);
+check("it goes to the claude endpoint", disconnectsFor("orgone").every((r) => r.url.includes("/claude/")));
+check("dormant pair stops heartbeating", connectedsFor("orgone").length === 0);
+check("dormancy logged", logLines.some((l) => l.includes("[session] client=claude org=orgone state=dormant")));
+check("chatgpt unaffected by claude dormancy", connectedsFor("seeded2").length >= 1);
+
+reset();
+await settle(900);
+check("disconnected is never repeated on later beats", disconnectsFor("orgone").length === 0, `got ${disconnectsFor("orgone").length}`);
+
+reset();
+activeSessions[0].lastSeen = Date.now();   // real activity returns
+await settle(950);
+{
+  const c = connectedsFor("orgone");
+  check("reactivated pair heartbeats again", c.length >= 1);
+  check("first report after wake undoes OUR dormancy with reconnect:true", c[0]?.body.reconnect === true);
+  check("later beats are plain connected again", c.slice(1).every((r) => !("reconnect" in r.body)));
+  check("reactivation logged", logLines.some((l) => l.includes("[session] client=claude org=orgone state=reactivated")));
+}
+
+// Immediate wake through the request path (no waiting for the next beat).
+activeSessions[0].lastSeen = Date.now() - 120000;
+activeSessions[1].lastSeen = Date.now() - 120000;
+await settle(950);                          // beat marks it dormant again
+reset();
+activeSessions[0].lastSeen = Date.now();    // the request touchSession would set this…
+M.reactivateSession(activeSessions[0]);     // …then handleMcp calls this
+await settle(120);                          // far less than one 400ms beat
+check("wake reports without waiting for a beat", connectedsFor("orgone").length >= 1);
+check("that immediate report carries reconnect:true", connectedsFor("orgone")[0]?.body.reconnect === true);
+
+// 8 --------------------------------------------------------------------------
+console.log("\n8. Store failures never throw");
 for (const m of ["400", "401", "404", "500", "hang"]) {
   mode = m;
   reset();
@@ -214,8 +258,8 @@ for (const m of ["400", "401", "404", "500", "hang"]) {
 check("timeout logged without a secret", logLines.some((l) => l.includes("status=failed (timeout)")));
 mode = "ok";
 
-// 8 --------------------------------------------------------------------------
-console.log("\n8. Store unreachable never throws");
+// 9 --------------------------------------------------------------------------
+console.log("\n9. Store unreachable never throws");
 // close() alone would wait forever: the heartbeat keeps a keep-alive socket
 // busy. Force every connection shut so new requests are refused immediately.
 store.close();
