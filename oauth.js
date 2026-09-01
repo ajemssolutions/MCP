@@ -52,6 +52,21 @@ loadSessions();
 export const lookupSession = (token) => sessions[token] || null;
 export const sessionCount = () => Object.keys(sessions).length;
 
+/** Every saved session. Used at startup to re-link organisations. */
+export const allSessions = () => Object.values(sessions);
+
+/**
+ * Remove one session and return { tenant, remaining } so the caller can decide
+ * whether the organisation still has another active session.
+ */
+export function revokeSession(token) {
+  const session = sessions[token];
+  if (!session) return null;
+  delete sessions[token];
+  saveSessions();
+  return { tenant: session.tenant, remaining: Object.values(sessions) };
+}
+
 // Expired codes and stale registrations would otherwise accumulate.
 setInterval(() => {
   const now = Date.now();
