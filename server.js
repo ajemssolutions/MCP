@@ -15,7 +15,7 @@ import { ENV_PATH, ENV_FOUND, envFlag } from "./config.js";
 import express from "express";
 
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { mountOAuth, lookupSession, sessionCount, allSessions, revokeSession } from "./oauth.js";
+import { mountOAuth, lookupSession, sessionCount, allSessions, revokeSession, setSessionClient } from "./oauth.js";
 import { getWorkspaceConfig, flattenForms } from "./ajems.js";
 import { buildServer, toolCount } from "./tools.js";
 import { cacheStats, limiterStats } from "./cache.js";
@@ -43,6 +43,11 @@ const baseUrlFor = (org) => HOST_TEMPLATE.replace("{org}", org);
 //
 // The secret key travels only in the POST body — never a URL, query string or
 // log line. Logs carry the endpoint name, the org and the HTTP status, nothing else.
+//
+// Strict client isolation: every session belongs to exactly one client, and a
+// Claude session is only ever reported to the claude endpoint, a ChatGPT
+// session only to the chatgpt endpoint. A session whose client cannot be
+// identified is reported to NEITHER endpoint — never a guess.
 // ---------------------------------------------------------------------------
 
 const STORE_BASE = process.env.CONNECTOR_STORE_URL || "https://connectors.ajems.com/api/connectors";
@@ -56,11 +61,16 @@ const HEARTBEAT_MS = Number(process.env.CONNECTOR_HEARTBEAT_MS || 5 * 60 * 1000)
 const linkedOrgs = new Map();   // org -> secretKey
 const orgClients = new Map();   // org -> Set of "claude" | "chatgpt"; absent means unknown
 
-/** Which endpoints to report an org to. Unknown client => both, never a guess. */
+/** Which endpoints to report an org to. Unknown client => none, never a guess. */
 function targetsFor(org) {
   const known = orgClients.get(org);
-  return known?.size ? [...known] : Object.keys(STORE_ENDPOINTS);
+  return known?.size ? [...known] : [];
 }
+
+const orgClientSet = (org) => {
+  if (!orgClients.has(org)) orgClients.set(org, new Set());
+  return orgClients.get(org);
+};
 
 /** Map an MCP clientInfo.name onto a Store connector id, or null if unrecognised. */
 function detectClient(name) {
@@ -93,13 +103,16 @@ async function reportToStore(endpoint, org, secretKey, extra = {}) {
   }
 }
 
-/** Report one org to every endpoint that applies. Fire and forget. */
-function reportOrg(org, extra = {}) {
+/** Report one org to ONE client's endpoint. Fire and forget. */
+function reportClient(org, client, extra = {}) {
   const secretKey = linkedOrgs.get(org);
-  if (!secretKey) return;
-  for (const client of targetsFor(org)) {
-    void reportToStore(STORE_ENDPOINTS[client], org, secretKey, extra);
-  }
+  if (!secretKey || !STORE_ENDPOINTS[client]) return;
+  void reportToStore(STORE_ENDPOINTS[client], org, secretKey, extra);
+}
+
+/** Report one org to every endpoint its identified clients map to. */
+function reportOrg(org, extra = {}) {
+  for (const client of targetsFor(org)) reportClient(org, client, extra);
 }
 
 /** Record a linked workspace, reusing the key the auth flow already verified. */
@@ -118,52 +131,69 @@ function seedLinkedOrgs(sessions = []) {
   for (const session of sessions) {
     if (!session?.tenant || !session?.secretKey) continue;
     linkedOrgs.set(session.tenant, session.secretKey);
-    const client = detectClient(session.client);
-    if (client) {
-      if (!orgClients.has(session.tenant)) orgClients.set(session.tenant, new Set());
-      orgClients.get(session.tenant).add(client);
-    }
+    const client = STORE_ENDPOINTS[session.client] ? session.client : detectClient(session.client);
+    if (client) orgClientSet(session.tenant).add(client);
   }
   return linkedOrgs.size;
 }
 
 /**
- * Narrow an org to one connector once the MCP handshake names the client.
- * Until this happens the org is reported to both endpoints.
+ * Record that an identified client is linked to this org. An org can hold both
+ * a Claude and a ChatGPT link at once; each is tracked and reported separately.
+ * Returns the client only when it is newly added.
  */
 function noteClient(org, name) {
   const client = detectClient(name);
   if (!client || !linkedOrgs.has(org)) return null;
-  const known = orgClients.get(org);
-  if (known?.size === 1 && known.has(client)) return null;
-  orgClients.set(org, new Set([client]));
+  const known = orgClientSet(org);
+  if (known.has(client)) return null;
+  known.add(client);
   console.log(`[connector-report] org=${org} identified as ${client}`);
   return client;
 }
 
 /**
- * Report disconnected, then drop the org — but only once no active session for
- * it remains, so one client unlinking does not knock another offline.
+ * Report ONE client disconnected, but only once no session for that same
+ * client and org remains — one Claude session unlinking must not knock a
+ * still-linked ChatGPT (or second Claude) session offline. The org itself is
+ * dropped only when no session for it is left at all. A session whose client
+ * was never identified was never reported, so it sends nothing on its way out.
  */
-function disconnectOrg(org, remainingSessions = []) {
+function disconnectOrg(org, client, remainingSessions = []) {
   const secretKey = linkedOrgs.get(org);
   if (!secretKey) return false;
-  if (remainingSessions.some((s) => s?.tenant === org)) return false;
 
-  for (const client of targetsFor(org)) {
+  const orgSessions = remainingSessions.filter((s) => s?.tenant === org);
+  if (STORE_ENDPOINTS[client] && !orgSessions.some((s) => s?.client === client)) {
     void reportToStore(STORE_ENDPOINTS[client], org, secretKey, { status: "disconnected" });
+    orgClients.get(org)?.delete(client);
   }
+
+  if (orgSessions.length) return false;
   linkedOrgs.delete(org);
   orgClients.delete(org);
   return true;
 }
 
-/** Unconditional 5-minute heartbeat. Keeps every linked org showing Online. */
-function startConnectorHeartbeat() {
-  const beat = () => { for (const org of linkedOrgs.keys()) reportOrg(org); };
-  beat();                                    // report seeded orgs immediately
+/**
+ * 5-minute heartbeat over ACTIVE sessions only, one report per (client, org)
+ * pair. Sessions with no identified client are skipped entirely.
+ */
+function startConnectorHeartbeat(getSessions = () => []) {
+  const beat = () => {
+    const seen = new Set();
+    for (const s of getSessions()) {
+      if (!s?.tenant || !s?.secretKey || !STORE_ENDPOINTS[s.client]) continue;
+      const key = `${s.client}:${s.tenant}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      void reportToStore(STORE_ENDPOINTS[s.client], s.tenant, s.secretKey);
+    }
+    return seen.size;
+  };
+  const first = beat();                      // report restored sessions immediately
   setInterval(beat, HEARTBEAT_MS).unref();   // never holds the process open
-  console.log(`[connector-report] heartbeat every ${HEARTBEAT_MS / 60000} min for ${linkedOrgs.size} org(s)`);
+  console.log(`[connector-report] heartbeat every ${HEARTBEAT_MS / 60000} min (${first} connection(s) now)`);
 }
 // [connector-report:end]
 
@@ -174,7 +204,7 @@ function startConnectorHeartbeat() {
 // a wrong key never produces a working session.
 // ---------------------------------------------------------------------------
 
-async function verifyCredentials(organisation, secretKey) {
+async function verifyCredentials(organisation, secretKey, clientHint) {
   // Strip everything that isn't a valid subdomain character. This is what stops
   // an entry like "evil.com/x" from pointing the server at another host.
   const org = organisation.replace(/[^a-zA-Z0-9-_]/g, "");
@@ -200,7 +230,18 @@ async function verifyCredentials(organisation, secretKey) {
 
   // Reuse the org and key just verified here — no second lookup, nothing re-asked.
   linkOrg(org, secretKey);
-  reportOrg(org, { reconnect: true });   // fresh link — best effort, never awaited
+
+  // The OAuth redirect URI / client name usually says who is signing in. If it
+  // doesn't, the session stays unreported until the MCP handshake names the
+  // client — never reported to an endpoint on a guess.
+  const client = detectClient(clientHint);
+  if (client) {
+    ctx.client = client;
+    orgClientSet(org).add(client);
+    reportClient(org, client, { reconnect: true });   // fresh link — best effort, never awaited
+  } else {
+    console.log(`[connector-report] org=${org} client not identified at sign-in — not reported yet`);
+  }
 
   return ctx;
 }
@@ -293,11 +334,19 @@ async function handleMcp(req, res) {
     });
   }
 
-  // initialize names the calling client, which narrows this org from "both
-  // endpoints" to the right one. Cheap, and skipped for every other method.
+  // initialize names the calling client. Sessions signed in before client
+  // detection existed get identified and stamped here, then start reporting
+  // to their one endpoint. Cheap, and skipped for every other method.
   if (req.body?.method === "initialize") {
     linkOrg(ctx.tenant, ctx.secretKey);
-    if (noteClient(ctx.tenant, req.body?.params?.clientInfo?.name)) reportOrg(ctx.tenant);
+    const client = detectClient(req.body?.params?.clientInfo?.name);
+    if (client) {
+      noteClient(ctx.tenant, req.body?.params?.clientInfo?.name);
+      const header = req.headers.authorization || "";
+      const token = header.startsWith("Bearer ") ? header.slice(7).trim() : (req.params?.token || req.query?.key || null);
+      // Report once, when the session is first stamped with its client.
+      if (token && setSessionClient(token, client)) reportClient(ctx.tenant, client);
+    }
   }
 
   if (rateLimited((req.headers.authorization || "").slice(-24))) {
@@ -350,7 +399,7 @@ app.post("/unlink", (req, res) => {
   const result = revokeSession(token);
   if (!result) return res.status(401).json({ error: "Unknown or already revoked token" });
 
-  disconnectOrg(result.tenant, result.remaining);
+  disconnectOrg(result.tenant, result.client, result.remaining);
   console.log(`[oauth] unlinked "${result.tenant}"`);
   res.json({ unlinked: true });
 });
@@ -381,7 +430,7 @@ const httpServer = app.listen(PORT, () => {
 // Re-link organisations from sessions restored at startup, then start
 // reporting. No one has to sign in again after a restart.
 seedLinkedOrgs(allSessions());
-startConnectorHeartbeat();
+startConnectorHeartbeat(allSessions);
 
 // Should exceed nginx's own timeouts to avoid mid-request resets.
 httpServer.keepAliveTimeout = 65_000;

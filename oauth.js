@@ -56,15 +56,28 @@ export const sessionCount = () => Object.keys(sessions).length;
 export const allSessions = () => Object.values(sessions);
 
 /**
- * Remove one session and return { tenant, remaining } so the caller can decide
- * whether the organisation still has another active session.
+ * Stamp a session with the AI client it belongs to ("claude" | "chatgpt"),
+ * persisted so the association survives restarts. Returns true only when the
+ * session was newly stamped — callers use that to report exactly once.
+ */
+export function setSessionClient(token, client) {
+  const session = sessions[token];
+  if (!session || session.client === client) return false;
+  session.client = client;
+  saveSessions();
+  return true;
+}
+
+/**
+ * Remove one session and return { tenant, client, remaining } so the caller
+ * can decide whether that client still has another session for the org.
  */
 export function revokeSession(token) {
   const session = sessions[token];
   if (!session) return null;
   delete sessions[token];
   saveSessions();
-  return { tenant: session.tenant, remaining: Object.values(sessions) };
+  return { tenant: session.tenant, client: session.client || null, remaining: Object.values(sessions) };
 }
 
 // Expired codes and stale registrations would otherwise accumulate.
@@ -234,9 +247,13 @@ export function mountOAuth(app, { publicUrl, verifyCredentials }) {
       return retry("Enter both your organisation name and secret key.");
     }
 
+    // Who is signing in? The redirect host is fixed by each vendor's platform
+    // (claude.ai / chatgpt.com), and the registered client name backs it up.
+    const clientHint = `${redirect_uri || ""} ${clients.get(client_id)?.name || ""}`;
+
     let ctx;
     try {
-      ctx = await verifyCredentials(organisation.trim(), secret_key.trim());
+      ctx = await verifyCredentials(organisation.trim(), secret_key.trim(), clientHint);
     } catch (e) {
       return retry(e.message);
     }
