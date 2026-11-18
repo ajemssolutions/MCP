@@ -7,7 +7,7 @@ import { store } from "./store.js";
 const missing = problems();
 const server = http.createServer(handler);
 server.listen(config.port, () => {
-  console.log(`AJEMS connector 5.0.2 on :${config.port}  public=${config.publicUrl}/mcp  ${config.envLabel || ""}`);
+  console.log(`AJEMS connector 5.0.3 on :${config.port}  public=${config.publicUrl}/mcp  ${config.envLabel || ""}`);
   console.log(`AJEMS api=${config.apiTemplate}  web=${config.webTemplate}  store=${store.kind}  .env=${ENV_FOUND ? "found" : "not found"}`);
   for (const p of missing) console.warn(`  ! ${p}`);
 });

@@ -12,7 +12,7 @@ import { sha256 } from "./seal.js";
 import { store } from "./store.js";
 
 const VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"];
-const VERSION = "5.0.2";
+const VERSION = "5.0.3";
 
 const INSTRUCTIONS = `You are connected to AJEMS (a no-code operations platform) as the signed-in person, with exactly their permissions.
 - Start with list_apps_and_forms when you do not know which form a question is about, then show_form_fields before filtering, counting or summarising.
@@ -88,8 +88,14 @@ async function handle(ctx, msg) {
         return isNotification ? null : rpcError(id, -32601, `Method not found: ${method}`);
     }
   } catch (e) {
-    if (e instanceof SignedOut) throw new NeedsSignIn(e.message);
-    if (e instanceof Refused) return rpcError(id, -32000, e.message);
+    if (e instanceof SignedOut) {
+      console.warn(`[mcp] org=${ctx.org} ${method}: AJEMS refused the connector token (401): ${String(e.message).slice(0, 160)}`);
+      throw new NeedsSignIn(e.message);
+    }
+    if (e instanceof Refused) {
+      console.warn(`[mcp] org=${ctx.org} ${method}: AJEMS answered ${e.status}: ${String(e.message).slice(0, 160)}`);
+      return rpcError(id, -32000, e.message);
+    }
     console.error(`[mcp] ${method} failed:`, e);
     return rpcError(id, -32603, "Internal error");
   }
@@ -105,7 +111,11 @@ function signInNeeded(res, description = "Sign in to AJEMS") {
 
 export async function mcpPost(req, res) {
   const ctx = contextOf(req.headers.authorization);
-  if (!ctx) return signInNeeded(res);
+  if (!ctx) {
+    // normal for the very first call (before sign-in); after sign-in it means the token is not ours or ended
+    if (req.headers.authorization) console.warn(`[mcp] ${req.url}: token not accepted (not this server's, changed, or past its 7 days)`);
+    return signInNeeded(res);
+  }
   let body;
   try {
     body = await readBody(req);
@@ -126,6 +136,8 @@ export async function mcpPost(req, res) {
     if (e instanceof NeedsSignIn) return signInNeeded(res, "Your AJEMS sign-in has ended. Sign in again.");
     throw e;
   }
+  const methods = messages.map((m) => m && m.method).filter(Boolean).join(",");
+  if (!/^(notifications\/|ping)/.test(methods)) console.log(`[mcp] org=${ctx.org} ${req.url} ${methods} ok`);
   if (!replies.length) { res.writeHead(202); return res.end(); }
   res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
   res.end(JSON.stringify(batch ? replies : replies[0]));

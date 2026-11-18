@@ -1,6 +1,6 @@
 {
   "name": "ajems-mcp",
-  "version": "5.0.2",
+  "version": "5.0.3",
   "description": "AJEMS connector for Claude and ChatGPT (MCP) — Sign in with AJEMS; every call checked by AJEMS as the signed-in person",
   "type": "module",
   "main": "server.js",

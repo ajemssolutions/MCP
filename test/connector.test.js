@@ -287,3 +287,11 @@ test("the workspace form may go on to the AJEMS website (Chrome checks the redir
   assert.match(csp, new RegExp(`form-action 'self' ${mockBase.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}`));
   assert.match(csp, /frame-ancestors 'none'/);
 });
+
+test("a connector added without /mcp works the same (POST /)", async () => {
+  const s = await signIn("staff@testco");
+  const res = await post(`${base}/`, { jsonrpc: "2.0", id: 1, method: "tools/list" }, { headers: { Authorization: `Bearer ${s.token}` } });
+  assert.equal(res.status, 200);
+  assert.ok((await res.json()).result.tools.length > 0);
+  assert.equal((await post(`${base}/`, { jsonrpc: "2.0", id: 1, method: "tools/list" })).status, 401);
+});

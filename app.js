@@ -32,7 +32,7 @@ export async function handler(req, res) {
         return send(res, 200, { name: "AJEMS connector", mcp: `${config.publicUrl}/mcp` });
       case "GET /health": {
         const missing = problems();
-        return send(res, missing.length ? 503 : 200, { ok: !missing.length, version: "5.0.2", env: config.envLabel || undefined,
+        return send(res, missing.length ? 503 : 200, { ok: !missing.length, version: "5.0.3", env: config.envLabel || undefined,
           public_url: config.publicUrl, connector_url: `${config.publicUrl}/mcp`,
           store: store.kind, ajems_api: config.apiTemplate, ajems_web: config.webTemplate, problems: missing });
       }
@@ -54,6 +54,7 @@ export async function handler(req, res) {
       case "POST /token":
         return await token(req, res);
       case "POST /mcp":
+      case "POST /":          // a connector added without /mcp at the end works too
         return await mcpPost(req, res);
       case "GET /mcp":
         return send(res, 405, { error: "Use POST for MCP requests" }, { Allow: "POST" });
